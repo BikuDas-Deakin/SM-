@@ -1,3 +1,6 @@
+// =======================
+// dashboard.js
+// =======================
 document.addEventListener("DOMContentLoaded", async () => {
   const token = localStorage.getItem("token");
   if (!token) {
@@ -5,73 +8,98 @@ document.addEventListener("DOMContentLoaded", async () => {
     return;
   }
 
-  try {
-    const res = await fetch("/api/dashboard", {
-      headers: { Authorization: `Bearer ${token}` }
-    });
+  // Fetch dashboard/rooms
+  const fetchDashboard = async () => {
+    try {
+      const res = await fetch("/api/rooms", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
 
-    if (!res.ok) throw new Error("Token invalid or expired");
+      if (!res.ok) {
+        if (res.status === 401) { // Unauthorized
+          alert("Session expired. Please log in again.");
+          localStorage.removeItem("token");
+          window.location.href = "/login.html";
+        } else {
+          console.warn("Failed to fetch rooms, status:", res.status);
+        }
+        return;
+      }
 
-    const data = await res.json();
+      const data = await res.json();
+      renderDashboard(data);
 
-    // User info
-    document.getElementById("username").textContent = data.username || "User";
+    } catch (err) {
+      console.error("Fetch error:", err);
+      alert("Could not load rooms. Please try again.");
+    }
+  };
 
-    // Stats
-    document.getElementById("sessions").textContent = data.sessions || 0;
-    document.getElementById("streak").textContent = data.streak || 0;
-    document.getElementById("timeStudied").textContent = data.timeStudied || 0;
+  // Render user + rooms
+  const renderDashboard = (data) => {
+    // Backend may return { username, sessions, streak, rooms: [...] } or just array
+    const username = data.username || "User";
+    const sessions = data.sessions ?? 0;
+    const streak = data.streak ?? 0;
+    const timeStudied = data.timeStudied ?? 0;
 
-    // Recent rooms
-    const roomsList = document.getElementById("recentRoomsList");
+    document.getElementById("username").textContent = username;
+    document.getElementById("sessions").textContent = sessions;
+    document.getElementById("streak").textContent = streak;
+    document.getElementById("timeStudied").textContent = timeStudied;
+
+    const rooms = data.rooms || data;
+
+    const roomsList = document.getElementById("roomsList");
     roomsList.innerHTML = "";
 
-    (data.recentRooms || []).forEach(room => {
+    (rooms || []).forEach(room => {
       const div = document.createElement("div");
       div.className = "room-item";
       div.innerHTML = `
         <div>
-          <strong>${room.name}</strong> (${room.participants} participants)
+          <strong>${room.name}</strong> (${room.participants?.length || 0} participants)
           <span class="${room.status === 'active' ? 'status-active' : 'status-ended'}">
             ${room.status === 'active' ? 'Active' : 'Ended'}
           </span>
+          <div class="small text-muted">Created by: ${room.creator?.username || "Unknown"}</div>
         </div>
-        ${room.status === 'active' ? `<button class="rejoin-btn">Rejoin</button>` : ''}
+        <button class="rejoin-btn" data-id="${room._id}">
+          ${room.status === "active" ? "Join" : "View"}
+        </button>
       `;
       roomsList.appendChild(div);
     });
 
-    // Rejoin buttons
     document.querySelectorAll(".rejoin-btn").forEach(btn => {
       btn.addEventListener("click", () => {
-        const roomName = btn.closest(".room-item").querySelector("strong").textContent;
-        alert(`Rejoining: ${roomName}`);
+        const roomId = btn.dataset.id;
+        window.location.href = `/room.html?id=${roomId}`;
       });
     });
+  };
 
-    // Redirect to Create Room page
-    document.getElementById("createRoomBtn").addEventListener("click", () => {
-      window.location.href = "/createRoom.html";
-    });
+  // Initial fetch
+  await fetchDashboard();
 
+  // Auto-refresh every 30s
+  setInterval(fetchDashboard, 30000);
 
-    // Join Room button
-    document.getElementById("joinRoomBtn").addEventListener("click", () => {
-      const roomCode = document.getElementById("roomCode").value.trim();
-      if (!roomCode) return alert("Please enter a room code");
-      alert(`Joining room: ${roomCode}`);
-    });
+  // Create room redirect
+  document.getElementById("createRoomBtn").addEventListener("click", () => {
+    window.location.href = "/createRoom.html";
+  });
 
-  } catch (err) {
-    console.error(err);
-    alert("Session expired. Please log in again.");
+  // Logout
+  document.getElementById("logoutBtn").addEventListener("click", () => {
     localStorage.removeItem("token");
     window.location.href = "/login.html";
-  }
-});
+  });
 
-// Logout
-document.getElementById("logoutBtn").addEventListener("click", () => {
-  localStorage.removeItem("token");
-  window.location.href = "/login.html";
+  // Join room input
+  document.getElementById("joinRoomBtn").addEventListener("click", () => {
+    const roomCode = document.getElementById("roomCode").value.trim();
+    if (!roomCode) return alert("Please enter a room code");
+    window.location.href = `/room.html?id=${roomCode}`;
+  });
 });

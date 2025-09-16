@@ -34,19 +34,22 @@ exports.createRoom = async (req, res) => {
 // Get all rooms (for dashboard listing)
 exports.getRooms = async (req, res) => {
   try {
-    // Public rooms + rooms where user is a participant
     const rooms = await Room.find({
       $or: [{ privacy: "public" }, { participants: req.user._id }],
     })
       .sort({ createdAt: -1 })
       .populate("creator", "username");
 
-    res.json(rooms);
+    res.json({
+      username: req.user.username,   // 👈 Add logged-in user info
+      rooms,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server Error" });
   }
 };
+
 
 // Get single room by ID
 exports.getRoomById = async (req, res) => {
