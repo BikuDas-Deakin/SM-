@@ -1,288 +1,63 @@
 // ===============================
 // app.js - StudyMate Backend
 // ===============================
+
 const express = require("express");
 const dotenv = require("dotenv");
 const mongoose = require("mongoose");
 const passport = require("passport");
+const path = require("path"); // Required for serving frontend files
 const http = require("http");
-const { Server } = require("socket.io");
-const path = require("path");
-const jwt = require("jsonwebtoken");
 
+// Load environment variables
 dotenv.config();
 
 const app = express();
 
-// Serve frontend
-app.use(express.static(path.join(__dirname, '../frontend/public')));
-app.use(express.json());
+// ===============================
+// Middleware
+// ===============================
+app.use(express.json()); // Parse JSON requests
+app.use(express.urlencoded({ extended: true }));
 
-// Passport
+// Serve frontend static files
+app.use(express.static(path.join(__dirname, "../frontend/public")));
+
+// Initialize Passport for authentication
 app.use(passport.initialize());
-require("./middleware/passport");
+require("./middleware/passport"); // Passport strategies
 
+// ===============================
 // Routes
+// ===============================
 const authRoutes = require("./routes/auth");
 const dashboardRoutes = require("./routes/dashboard");
 const roomsRoutes = require("./routes/rooms");
 const chatRoutes = require("./routes/chat");
 
-app.use("/api", chatRoutes);
-app.use("/api/rooms", roomsRoutes);
+// Redirect root URL to dashboard
+app.get("/", (req, res) => {
+  res.redirect("/dashboard.html"); // dashboard.html should be in frontend/public
+});
+
 app.use("/api/auth", authRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/rooms", roomsRoutes);
+app.use("/api/chat", chatRoutes);
 
-// MongoDB connection
+// ===============================
+// MongoDB Connection
+// ===============================
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected"))
   .catch(err => console.error("MongoDB connection error:", err));
 
-// Models
-const Chat = require("./models/Chat");
-const User = require("./models/User");
-
-// ==========================
-// Socket.io setup
-// ==========================
+// ===============================
+// Start Server with Socket.io
+// ===============================
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const { initSocket } = require("./socket"); // Socket logic separated
+initSocket(server); // Pass server instance
 
-// rooms structure
-// rooms = {
-//   [roomId]: { participants: [{ socketId, username, userId }], adminId, timer, sessionCount }
-// }
-const rooms = {};
-
-io.on("connection", (socket) => {
-  console.log(`[SOCKET] Client connected: ${socket.id}`);
-
-  // ===============================
-  // Join Room
-  // ===============================
-  socket.on("joinRoom", async ({ roomId, token }) => {
-    if (!token) return console.log("[JOIN] No token provided");
-
-    let decoded;
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET);
-    } catch (err) {
-      console.error("[JOIN] Invalid token:", err.message);
-      return;
-    }
-
-    const userId = decoded.id;
-
-    // Fetch user from DB to get username
-    let user;
-    try {
-      user = await User.findById(userId);
-      if (!user) throw new Error("User not found");
-    } catch (err) {
-      console.error("[JOIN] Failed to get user:", err.message);
-      return;
-    }
-
-    const username = user.username;
-    console.log(`[JOIN] ${username} joining room ${roomId}`);
-
-    socket.join(roomId);
-
-    if (!rooms[roomId]) {
-      rooms[roomId] = {
-        participants: [],
-        adminId: socket.id,
-        timer: { timeLeft: 25*60, running: false, phase: "Study Time" },
-        currentSession: 1,
-        totalSessions: 4,
-      };
-    }
-
-    const room = rooms[roomId];
-
-    // Load chat history
-    try {
-      const messages = await Chat.find({ roomId })
-        .sort({ createdAt: 1 })
-        .populate("senderId", "username");
-
-      const formatted = messages.map(m => ({
-        username: m.senderId.username,
-        message: m.message,
-        createdAt: m.createdAt
-      }));
-
-      socket.emit("loadMessages", formatted);
-    } catch (err) {
-      console.error("[JOIN] Failed to load chat messages:", err);
-      socket.emit("loadMessages", []);
-    }
-
-    // Add or update participant with proper username
-    const existing = room.participants.find(p => p.userId === userId);
-    if (!existing) {
-      room.participants.push({ socketId: socket.id, username, userId });
-    } else {
-      existing.socketId = socket.id;
-      existing.username = username;
-    }
-
-    console.log("[JOIN] Participants before emit:", room.participants);
-
-    io.to(roomId).emit("participantsUpdate", {
-      participants: room.participants,
-      adminId: room.adminId
-    });
-
-    io.to(roomId).emit("systemMessage", `${username} joined the room`);
-
-    socket.emit("timerUpdate", room.timer);
-    socket.emit("sessionUpdate", {
-      currentSession: room.currentSession,
-      totalSessions: room.totalSessions
-    });
-  });
-
-  // ===============================
-  // Timer Controls (admin only)
-  // ===============================
-  socket.on("toggleTimer", ({ roomId }) => {
-    const room = rooms[roomId];
-    if (!room || socket.id !== room.adminId) return;
-    room.timer.running = !room.timer.running;
-    io.to(roomId).emit("timerUpdate", room.timer);
-  });
-
-  socket.on("resetTimer", ({ roomId }) => {
-    const room = rooms[roomId];
-    if (!room || socket.id !== room.adminId) return;
-    room.timer = { timeLeft: 25*60, running: false, phase: "Study Time" };
-    room.currentSession = 1;
-    io.to(roomId).emit("timerUpdate", room.timer);
-    io.to(roomId).emit("sessionUpdate", {
-      currentSession: room.currentSession,
-      totalSessions: room.totalSessions
-    });
-  });
-
-  socket.on("skipPhase", ({ roomId }) => {
-    const room = rooms[roomId];
-    if (!room || socket.id !== room.adminId) return;
-
-    if (room.timer.phase === "Study Time") {
-      room.timer.phase = "Break Time";
-      room.timer.timeLeft = 5*60;
-    } else {
-      room.timer.phase = "Study Time";
-      room.timer.timeLeft = 25*60;
-      if (room.currentSession < room.totalSessions) room.currentSession++;
-    }
-    room.timer.running = false;
-
-    io.to(roomId).emit("timerUpdate", room.timer);
-    io.to(roomId).emit("sessionUpdate", {
-      currentSession: room.currentSession,
-      totalSessions: room.totalSessions
-    });
-  });
-
-  // ===============================
-  // Chat
-  // ===============================
-  socket.on("sendMessage", async ({ roomId, message, token }) => {
-    if (!token) return console.log("[CHAT] No token provided");
-
-    let decoded;
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET);
-    } catch (err) {
-      console.error("[CHAT] Invalid token:", err.message);
-      return;
-    }
-
-    const senderId = decoded.id;
-
-    // Fetch username from DB to ensure proper display
-    let user;
-    try {
-      user = await User.findById(senderId);
-      if (!user) throw new Error("User not found");
-    } catch (err) {
-      console.error("[CHAT] Failed to get user:", err.message);
-      return;
-    }
-
-    const username = user.username;
-
-    try {
-      // Save to DB
-      const chat = await Chat.create({ roomId, senderId, message });
-      console.log(`[CHAT] ${username}: ${message} saved`);
-      io.to(roomId).emit("newMessage", { username, message });
-    } catch (err) {
-      console.error("[CHAT] Failed to save message:", err);
-    }
-  });
-
-  // ===============================
-  // Disconnect
-  // ===============================
-  socket.on("disconnect", () => {
-    for (const roomId in rooms) {
-      const room = rooms[roomId];
-      const idx = room.participants.findIndex(p => p.socketId === socket.id);
-      if (idx !== -1) {
-        const [leaving] = room.participants.splice(idx, 1);
-
-        if (room.adminId === socket.id && room.participants.length > 0) {
-          room.adminId = room.participants[0].socketId;
-          io.to(roomId).emit("systemMessage",
-            `${room.participants[0].username} is now the admin`);
-        }
-
-        io.to(roomId).emit("participantsUpdate", {
-          participants: room.participants,
-          adminId: room.adminId
-        });
-        io.to(roomId).emit("systemMessage",
-          `${leaving.username} left the room`);
-      }
-    }
-  });
-});
-
-// ===============================
-// Timer tick
-// ===============================
-setInterval(() => {
-  for (const roomId in rooms) {
-    const room = rooms[roomId];
-    if (room.timer.running) {
-      room.timer.timeLeft--;
-
-      if (room.timer.timeLeft <= 0) {
-        room.timer.running = false;
-        if (room.timer.phase === "Study Time") {
-          room.timer.phase = "Break Time";
-          room.timer.timeLeft = 5*60;
-        } else {
-          room.timer.phase = "Study Time";
-          room.timer.timeLeft = 25*60;
-          if (room.currentSession < room.totalSessions) room.currentSession++;
-        }
-        io.to(roomId).emit("sessionUpdate", {
-          currentSession: room.currentSession,
-          totalSessions: room.totalSessions
-        });
-      }
-
-      io.to(roomId).emit("timerUpdate", room.timer);
-    }
-  }
-}, 1000);
-
-// ===============================
-// Start server
-// ===============================
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
